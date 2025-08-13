@@ -24,8 +24,8 @@ A modern, cross-platform pre-processor and visualization tool for OpenRadioss fi
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/openradioss-preprocessor.git
-cd openradioss-preprocessor
+git clone https://git.tai.com.tr/t25254/tams-crash.git
+cd TAMS-CRASH
 
 # Initialize submodules
 git submodule update --init --recursive
