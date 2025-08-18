@@ -27,6 +27,7 @@ public:
     // Material operations
     void AddMaterial(const Material& material);
     Material* GetMaterial(int materialId);
+    const std::vector<Material>& GetMaterials() const { return m_Materials; }  // THIS WAS MISSING
     
     // Model properties
     void CalculateBounds();

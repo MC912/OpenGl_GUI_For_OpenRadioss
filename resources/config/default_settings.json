@@ -1,0 +1,70 @@
+{
+    "application": {
+        "version": "1.0.0",
+        "window": {
+            "width": 1600,
+            "height": 900,
+            "fullscreen": false,
+            "vsync": true
+        },
+        "theme": "dark"
+    },
+    
+    "renderer": {
+        "backgroundColor": [0.05, 0.05, 0.15],
+        "showNodes": true,
+        "showWireframe": true,
+        "showSolid": false,
+        "showNormals": false,
+        "enableLighting": true,
+        "nodeSize": 3.0,
+        "lineWidth": 1.0,
+        "colors": {
+            "nodes": [1.0, 0.3, 0.3],
+            "wireframe": [0.9, 0.9, 0.9],
+            "solid": [0.6, 0.8, 1.0]
+        }
+    },
+    
+    "camera": {
+        "fov": 45.0,
+        "nearPlane": 0.1,
+        "farPlane": 1000.0,
+        "movementSpeed": 2.5,
+        "mouseSensitivity": 0.1,
+        "zoomSpeed": 2.0
+    },
+    
+    "solver": {
+        "defaultPath": "/usr/local/bin/openradioss",
+        "workingDirectory": "./work",
+        "defaultProcessors": 4,
+        "useMPI": false,
+        "autoSave": true,
+        "outputFormat": "h3d"
+    },
+    
+    "gui": {
+        "showPropertyPanel": true,
+        "showToolbar": true,
+        "showStatusBar": true,
+        "autoSaveInterval": 300,
+        "recentFilesMax": 10
+    },
+    
+    "fileIO": {
+        "defaultExtension": ".rad",
+        "supportedFormats": [
+            ".rad",
+            ".k",
+            ".key",
+            ".inp"
+        ],
+        "exportFormats": [
+            ".rad",
+            ".stl",
+            ".vtk",
+            ".obj"
+        ]
+    }
+}
