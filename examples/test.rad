@@ -1,0 +1,17 @@
+#RADIOSS STARTER
+/BEGIN
+/TITLE
+Simple Test Model
+/NODE
+        1               0.0               0.0               0.0
+        2               1.0               0.0               0.0
+        3               1.0               1.0               0.0
+        4               0.0               1.0               0.0
+        5               0.5               0.5               0.5
+/SHELL
+        1         1         1         1         2         3         4
+/MAT/LAW1
+        1              7.8E-6              210000               0.3
+/PROP/SHELL
+        1               0.001
+/END

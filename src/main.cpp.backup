@@ -1,0 +1,966 @@
+#include <iostream>
+#include <vector>
+#include <memory>
+#include <fstream>
+#include <string>
+
+// OpenGL and GLFW
+#ifndef GLFW_INCLUDE_NONE
+#define GLFW_INCLUDE_NONE
+#endif
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+
+// Dear ImGui
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
+// Math library
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+// File dialog
+#if __has_include(<nfd.h>)
+#include <nfd.h>
+#define HAS_NFD
+#endif
+
+// Our RAD file reader
+#if __has_include("../include/radfilereader.h")
+#include "../include/radfilereader.h"
+#elif __has_include("radfilereader.h")
+#include "radfilereader.h"
+#endif
+
+// Application state structure
+struct AppState {
+    // Window and OpenGL
+    GLFWwindow* window = nullptr;
+    int window_width = 1200;
+    int window_height = 800;
+    
+    // Camera
+    glm::vec3 camera_pos = glm::vec3(0.0f, 0.0f, 5.0f);
+    glm::vec3 camera_target = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 camera_up = glm::vec3(0.0f, 1.0f, 0.0f);
+    float camera_fov = 45.0f;
+    float camera_distance = 5.0f;
+    
+    // Mouse interaction
+    bool mouse_dragging = false;
+    double last_mouse_x = 0.0;
+    double last_mouse_y = 0.0;
+    float camera_rotation_x = 0.0f;
+    float camera_rotation_y = 0.0f;
+    
+    // Rendering options
+    bool show_nodes = true;
+    bool show_elements = true;
+    bool show_wireframe = false;
+    bool show_axes = true;
+    glm::vec3 background_color = glm::vec3(0.2f, 0.3f, 0.3f);
+    
+    // UI state
+    bool show_file_dialog = false;
+    bool show_about = false;
+    bool show_stats = false;
+    bool show_viewport = true;
+    bool show_properties = true;
+    std::string current_file;
+    
+    // Model data
+    OpenRadiossGUI::RadFileReader rad_reader;
+    
+    // OpenGL objects
+    GLuint shader_program = 0;
+    GLuint node_vao = 0, node_vbo = 0;
+    GLuint element_vao = 0, element_vbo = 0, element_ebo = 0;
+    GLuint axis_vao = 0, axis_vbo = 0;
+    size_t element_index_count = 0;
+    size_t node_count = 0;
+    
+    // Model bounds
+    glm::vec3 model_min = glm::vec3(0.0f);
+    glm::vec3 model_max = glm::vec3(0.0f);
+    bool model_loaded = false;
+};
+
+// Shader sources
+const char* vertex_shader_source = R"(
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aColor;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 FragColor;
+
+void main() {
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+    FragColor = aColor;
+}
+)";
+
+const char* fragment_shader_source = R"(
+#version 330 core
+in vec3 FragColor;
+out vec4 color;
+
+void main() {
+    color = vec4(FragColor, 1.0);
+}
+)";
+
+// Function declarations
+bool initializeApp(AppState& app);
+void setupImGui(AppState& app);
+GLuint createShaderProgram();
+void createAxisGeometry(AppState& app);
+void loadRADFile(AppState& app, const std::string& filename);
+void createGeometryBuffers(AppState& app);
+void updateCamera(AppState& app);
+void renderFrame(AppState& app);
+void renderMenuBar(AppState& app);
+void renderSidebar(AppState& app);
+void renderViewport(AppState& app);
+void cleanup(AppState& app);
+
+// GLFW callbacks
+void errorCallback(int error, const char* description);
+void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
+void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+void windowSizeCallback(GLFWwindow* window, int width, int height);
+
+int main() {
+    AppState app;
+    
+    std::cout << "Starting OpenRadioss GUI..." << std::endl;
+    
+    if (!initializeApp(app)) {
+        std::cerr << "Failed to initialize application" << std::endl;
+        return -1;
+    }
+    
+    setupImGui(app);
+    
+    app.shader_program = createShaderProgram();
+    if (app.shader_program == 0) {
+        std::cerr << "Failed to create shader program" << std::endl;
+        cleanup(app);
+        return -1;
+    }
+    
+    createAxisGeometry(app);
+    
+    std::cout << "Application initialized successfully!" << std::endl;
+    std::cout << "Use File -> Open to load a RAD file" << std::endl;
+    
+    // Main render loop
+    while (!glfwWindowShouldClose(app.window)) {
+        glfwPollEvents();
+        
+        updateCamera(app);
+        renderFrame(app);
+        
+        glfwSwapBuffers(app.window);
+    }
+    
+    cleanup(app);
+    return 0;
+}
+
+bool initializeApp(AppState& app) {
+    // Set error callback
+    glfwSetErrorCallback(errorCallback);
+    
+    // Initialize GLFW
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        return false;
+    }
+    
+    // Configure GLFW
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_SAMPLES, 4); // 4x MSAA
+    
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#endif
+    
+    // Create window
+    app.window = glfwCreateWindow(app.window_width, app.window_height, 
+                                  "OpenRadioss GUI - Pre-processor & Visualization", 
+                                  nullptr, nullptr);
+    if (!app.window) {
+        std::cerr << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return false;
+    }
+    
+    glfwMakeContextCurrent(app.window);
+    glfwSetWindowUserPointer(app.window, &app);
+    
+    // Set callbacks
+    glfwSetKeyCallback(app.window, keyCallback);
+    glfwSetMouseButtonCallback(app.window, mouseButtonCallback);
+    glfwSetCursorPosCallback(app.window, cursorPosCallback);
+    glfwSetScrollCallback(app.window, scrollCallback);
+    glfwSetWindowSizeCallback(app.window, windowSizeCallback);
+    
+    // Initialize GLEW
+    if (glewInit() != GLEW_OK) {
+        std::cerr << "Failed to initialize GLEW" << std::endl;
+        return false;
+    }
+    
+    // Print OpenGL info
+    std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
+    std::cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
+    
+    // Enable OpenGL features
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_MULTISAMPLE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Set initial viewport
+    glViewport(0, 0, app.window_width, app.window_height);
+    
+    return true;
+}
+
+void setupImGui(AppState& app) {
+    // Setup ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    
+    // Only enable docking if available (newer ImGui versions)
+    #ifdef ImGuiConfigFlags_DockingEnable
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    #endif
+    
+    // Setup ImGui style
+    ImGui::StyleColorsDark();
+    
+    // Setup platform/renderer backends
+    ImGui_ImplGlfw_InitForOpenGL(app.window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+}
+
+GLuint createShaderProgram() {
+    // Compile vertex shader
+    GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertex_shader, 1, &vertex_shader_source, nullptr);
+    glCompileShader(vertex_shader);
+    
+    // Check vertex shader compilation
+    GLint success;
+    char info_log[512];
+    glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(vertex_shader, 512, nullptr, info_log);
+        std::cerr << "Vertex shader compilation failed: " << info_log << std::endl;
+        return 0;
+    }
+    
+    // Compile fragment shader
+    GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragment_shader, 1, &fragment_shader_source, nullptr);
+    glCompileShader(fragment_shader);
+    
+    // Check fragment shader compilation
+    glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(fragment_shader, 512, nullptr, info_log);
+        std::cerr << "Fragment shader compilation failed: " << info_log << std::endl;
+        return 0;
+    }
+    
+    // Create and link shader program
+    GLuint shader_program = glCreateProgram();
+    glAttachShader(shader_program, vertex_shader);
+    glAttachShader(shader_program, fragment_shader);
+    glLinkProgram(shader_program);
+    
+    // Check program linking
+    glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(shader_program, 512, nullptr, info_log);
+        std::cerr << "Shader program linking failed: " << info_log << std::endl;
+        return 0;
+    }
+    
+    // Clean up shaders
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+    
+    return shader_program;
+}
+
+void createAxisGeometry(AppState& app) {
+    // Create coordinate axes
+    float axis_data[] = {
+        // X axis (red)
+        0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,
+        // Y axis (green)
+        0.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
+        // Z axis (blue)
+        0.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,
+        0.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f,
+    };
+    
+    glGenVertexArrays(1, &app.axis_vao);
+    glGenBuffers(1, &app.axis_vbo);
+    
+    glBindVertexArray(app.axis_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, app.axis_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(axis_data), axis_data, GL_STATIC_DRAW);
+    
+    // Position attribute
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    
+    // Color attribute
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    
+    glBindVertexArray(0);
+}
+
+void loadRADFile(AppState& app, const std::string& filename) {
+    std::cout << "Loading RAD file: " << filename << std::endl;
+    
+    if (app.rad_reader.loadFile(filename)) {
+        app.current_file = filename;
+        app.model_loaded = true;
+        
+        std::cout << "Successfully loaded: " << filename << std::endl;
+        std::cout << "Nodes: " << app.rad_reader.getNodeCount() << std::endl;
+        std::cout << "Elements: " << app.rad_reader.getElementCount() << std::endl;
+        
+        // Get model bounds and adjust camera
+        if (app.rad_reader.getNodeCount() > 0) {
+            auto bbox = app.rad_reader.getBoundingBox();
+            app.model_min = bbox.first;
+            app.model_max = bbox.second;
+            
+            glm::vec3 center = (app.model_min + app.model_max) * 0.5f;
+            glm::vec3 size = app.model_max - app.model_min;
+            float max_size = glm::max(glm::max(size.x, size.y), size.z);
+            
+            // Adjust camera to view the model
+            app.camera_target = center;
+            app.camera_distance = max_size * 2.0f;
+            app.camera_rotation_x = 0.0f;
+            app.camera_rotation_y = 0.0f;
+            
+            std::cout << "Model bounds: (" 
+                      << app.model_min.x << ", " << app.model_min.y << ", " << app.model_min.z 
+                      << ") to (" 
+                      << app.model_max.x << ", " << app.model_max.y << ", " << app.model_max.z 
+                      << ")" << std::endl;
+        }
+        
+        createGeometryBuffers(app);
+    } else {
+        std::cerr << "Failed to load file: " << filename << std::endl;
+        std::cerr << "Error: " << app.rad_reader.getLastError() << std::endl;
+        app.model_loaded = false;
+    }
+}
+
+void createGeometryBuffers(AppState& app) {
+    if (!app.rad_reader.isValid()) return;
+    
+    const auto& nodes = app.rad_reader.getNodes();
+    const auto& elements = app.rad_reader.getElements();
+    
+    // Clean up existing buffers
+    if (app.node_vao != 0) {
+        glDeleteVertexArrays(1, &app.node_vao);
+        glDeleteBuffers(1, &app.node_vbo);
+        app.node_vao = 0;
+        app.node_vbo = 0;
+    }
+    
+    if (app.element_vao != 0) {
+        glDeleteVertexArrays(1, &app.element_vao);
+        glDeleteBuffers(1, &app.element_vbo);
+        glDeleteBuffers(1, &app.element_ebo);
+        app.element_vao = 0;
+        app.element_vbo = 0;
+        app.element_ebo = 0;
+    }
+    
+    // Create node geometry
+    if (!nodes.empty()) {
+        std::vector<float> node_data;
+        for (const auto& node : nodes) {
+            // Position
+            node_data.push_back(node.position.x);
+            node_data.push_back(node.position.y);
+            node_data.push_back(node.position.z);
+            // Color (yellow for nodes)
+            node_data.push_back(1.0f);
+            node_data.push_back(1.0f);
+            node_data.push_back(0.0f);
+        }
+        
+        glGenVertexArrays(1, &app.node_vao);
+        glGenBuffers(1, &app.node_vbo);
+        
+        glBindVertexArray(app.node_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, app.node_vbo);
+        glBufferData(GL_ARRAY_BUFFER, node_data.size() * sizeof(float), node_data.data(), GL_STATIC_DRAW);
+        
+        // Position attribute
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        
+        // Color attribute
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        
+        glBindVertexArray(0);
+        app.node_count = nodes.size();
+    }
+    
+    // Create element geometry
+    if (!elements.empty()) {
+        std::vector<float> element_data;
+        std::vector<unsigned int> indices;
+        
+        for (const auto& element : elements) {
+            if (element.nodeIds.size() < 3) continue;
+            
+            // Get element nodes and create vertices
+            std::vector<size_t> element_indices;
+            for (int node_id : element.nodeIds) {
+                const auto* node = app.rad_reader.findNode(node_id);
+                if (node) {
+                    element_indices.push_back(element_data.size() / 6);
+                    
+                    // Position
+                    element_data.push_back(node->position.x);
+                    element_data.push_back(node->position.y);
+                    element_data.push_back(node->position.z);
+                    
+                    // Color based on element type
+                    switch (element.type) {
+                        case OpenRadiossGUI::Element::TRIA3:
+                            element_data.push_back(0.0f); element_data.push_back(1.0f); element_data.push_back(0.0f);
+                            break;
+                        case OpenRadiossGUI::Element::QUAD4:
+                            element_data.push_back(0.0f); element_data.push_back(0.0f); element_data.push_back(1.0f);
+                            break;
+                        case OpenRadiossGUI::Element::TETRA4:
+                            element_data.push_back(1.0f); element_data.push_back(1.0f); element_data.push_back(0.0f);
+                            break;
+                        case OpenRadiossGUI::Element::HEXA8:
+                            element_data.push_back(1.0f); element_data.push_back(0.0f); element_data.push_back(1.0f);
+                            break;
+                        default:
+                            element_data.push_back(0.7f); element_data.push_back(0.7f); element_data.push_back(0.7f);
+                            break;
+                    }
+                }
+            }
+            
+            // Create triangular faces for rendering
+            if (element_indices.size() >= 3) {
+                if (element.type == OpenRadiossGUI::Element::TRIA3) {
+                    // Triangle
+                    indices.push_back(element_indices[0]);
+                    indices.push_back(element_indices[1]);
+                    indices.push_back(element_indices[2]);
+                } else if (element.type == OpenRadiossGUI::Element::QUAD4) {
+                    // Quad -> 2 triangles
+                    indices.push_back(element_indices[0]);
+                    indices.push_back(element_indices[1]);
+                    indices.push_back(element_indices[2]);
+                    
+                    indices.push_back(element_indices[0]);
+                    indices.push_back(element_indices[2]);
+                    indices.push_back(element_indices[3]);
+                }
+                // Add more element types as needed
+            }
+        }
+        
+        if (!element_data.empty() && !indices.empty()) {
+            glGenVertexArrays(1, &app.element_vao);
+            glGenBuffers(1, &app.element_vbo);
+            glGenBuffers(1, &app.element_ebo);
+            
+            glBindVertexArray(app.element_vao);
+            
+            glBindBuffer(GL_ARRAY_BUFFER, app.element_vbo);
+            glBufferData(GL_ARRAY_BUFFER, element_data.size() * sizeof(float), element_data.data(), GL_STATIC_DRAW);
+            
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, app.element_ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+            
+            // Position attribute
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+            glEnableVertexAttribArray(0);
+            
+            // Color attribute
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+            glEnableVertexAttribArray(1);
+            
+            glBindVertexArray(0);
+            app.element_index_count = indices.size();
+        }
+    }
+    
+    std::cout << "Geometry buffers created successfully" << std::endl;
+}
+
+void updateCamera(AppState& app) {
+    // Calculate camera position based on rotation and distance
+    float x = app.camera_distance * cos(app.camera_rotation_y) * cos(app.camera_rotation_x);
+    float y = app.camera_distance * sin(app.camera_rotation_x);
+    float z = app.camera_distance * sin(app.camera_rotation_y) * cos(app.camera_rotation_x);
+    
+    app.camera_pos = app.camera_target + glm::vec3(x, y, z);
+}
+
+void renderFrame(AppState& app) {
+    // Start ImGui frame
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    
+    // Create dockspace only if docking is available
+    #ifdef ImGuiConfigFlags_DockingEnable
+    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable) {
+        ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());
+    }
+    #endif
+    
+    // Clear the framebuffer first
+    glClearColor(app.background_color.r, app.background_color.g, app.background_color.b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    // Render UI
+    renderMenuBar(app);
+    if (app.show_properties) {
+        renderSidebar(app);
+    }
+    if (app.show_viewport) {
+        renderViewport(app);
+    }
+    
+    // Handle file dialog
+    if (app.show_file_dialog) {
+#ifdef HAS_NFD
+        nfdchar_t* out_path = nullptr;
+        nfdfilteritem_t filter_item[1] = {{"RAD Files", "rad"}};
+        
+        nfdresult_t result = NFD_OpenDialog(&out_path, filter_item, 1, nullptr);
+        if (result == NFD_OKAY) {
+            loadRADFile(app, std::string(out_path));
+            free(out_path);
+        }
+#else
+        // Simple file input as fallback
+        static char filename[256] = "";
+        ImGui::Begin("Open File", &app.show_file_dialog);
+        ImGui::Text("Enter RAD file path:");
+        ImGui::InputText("##filepath", filename, sizeof(filename));
+        if (ImGui::Button("Load")) {
+            if (strlen(filename) > 0) {
+                loadRADFile(app, std::string(filename));
+                app.show_file_dialog = false;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            app.show_file_dialog = false;
+        }
+        ImGui::End();
+#endif
+        app.show_file_dialog = false;
+    }
+    
+    // About dialog
+    if (app.show_about) {
+        ImGui::Begin("About OpenRadioss GUI", &app.show_about);
+        ImGui::Text("OpenRadioss GUI v1.0.0");
+        ImGui::Separator();
+        ImGui::Text("A modern OpenGL-based pre-processor and");
+        ImGui::Text("visualization tool for OpenRadioss finite");
+        ImGui::Text("element solver.");
+        ImGui::Separator();
+        ImGui::Text("Built with OpenGL, Dear ImGui, GLFW");
+        ImGui::End();
+    }
+    
+    // Statistics dialog
+    if (app.show_stats && app.model_loaded) {
+        ImGui::Begin("Model Statistics", &app.show_stats);
+        ImGui::Text("File: %s", app.current_file.c_str());
+        ImGui::Separator();
+        ImGui::Text("Nodes: %zu", app.rad_reader.getNodeCount());
+        ImGui::Text("Elements: %zu", app.rad_reader.getElementCount());
+        
+        if (app.model_loaded) {
+            ImGui::Separator();
+            ImGui::Text("Bounding Box:");
+            ImGui::Text("Min: %.3f, %.3f, %.3f", app.model_min.x, app.model_min.y, app.model_min.z);
+            ImGui::Text("Max: %.3f, %.3f, %.3f", app.model_max.x, app.model_max.y, app.model_max.z);
+            
+            glm::vec3 size = app.model_max - app.model_min;
+            ImGui::Text("Size: %.3f, %.3f, %.3f", size.x, size.y, size.z);
+        }
+        ImGui::End();
+    }
+    
+    // Render ImGui
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void renderMenuBar(AppState& app) {
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Open...", "Ctrl+O")) {
+                app.show_file_dialog = true;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit", "Alt+F4")) {
+                glfwSetWindowShouldClose(app.window, GLFW_TRUE);
+            }
+            ImGui::EndMenu();
+        }
+        
+        if (ImGui::BeginMenu("View")) {
+            ImGui::MenuItem("Viewport", nullptr, &app.show_viewport);
+            ImGui::MenuItem("Properties", nullptr, &app.show_properties);
+            ImGui::Separator();
+            ImGui::MenuItem("Show Nodes", nullptr, &app.show_nodes);
+            ImGui::MenuItem("Show Elements", nullptr, &app.show_elements);
+            ImGui::MenuItem("Wireframe", nullptr, &app.show_wireframe);
+            ImGui::MenuItem("Show Axes", nullptr, &app.show_axes);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Statistics")) {
+                app.show_stats = true;
+            }
+            ImGui::EndMenu();
+        }
+        
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("About")) {
+                app.show_about = true;
+            }
+            ImGui::EndMenu();
+        }
+        
+        ImGui::EndMainMenuBar();
+    }
+}
+
+void renderSidebar(AppState& app) {
+    ImGui::Begin("Properties", &app.show_properties);
+    
+    if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Show Nodes", &app.show_nodes);
+        ImGui::Checkbox("Show Elements", &app.show_elements);
+        ImGui::Checkbox("Wireframe Mode", &app.show_wireframe);
+        ImGui::Checkbox("Show Axes", &app.show_axes);
+        ImGui::ColorEdit3("Background", glm::value_ptr(app.background_color));
+    }
+    
+    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("FOV", &app.camera_fov, 10.0f, 120.0f);
+        ImGui::SliderFloat("Distance", &app.camera_distance, 0.1f, 100.0f);
+        
+        if (ImGui::Button("Reset Camera")) {
+            app.camera_rotation_x = 0.0f;
+            app.camera_rotation_y = 0.0f;
+            if (app.model_loaded) {
+                glm::vec3 size = app.model_max - app.model_min;
+                float max_size = glm::max(glm::max(size.x, size.y), size.z);
+                app.camera_distance = max_size * 2.0f;
+                app.camera_target = (app.model_min + app.model_max) * 0.5f;
+            } else {
+                app.camera_distance = 5.0f;
+                app.camera_target = glm::vec3(0.0f);
+            }
+        }
+    }
+    
+    if (app.model_loaded && ImGui::CollapsingHeader("Model Info", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("File: %s", app.current_file.c_str());
+        ImGui::Text("Title: %s", app.rad_reader.getTitle().c_str());
+        ImGui::Separator();
+        ImGui::Text("Nodes: %zu", app.rad_reader.getNodeCount());
+        ImGui::Text("Elements: %zu", app.rad_reader.getElementCount());
+        
+        if (ImGui::Button("Show Statistics")) {
+            app.show_stats = true;
+        }
+    }
+    
+    if (!app.model_loaded) {
+        ImGui::Separator();
+        ImGui::Text("No model loaded");
+        if (ImGui::Button("Open File...")) {
+            app.show_file_dialog = true;
+        }
+    }
+    
+    ImGui::End();
+}
+
+void renderViewport(AppState& app) {
+    ImGui::Begin("3D Viewport", &app.show_viewport);
+    
+    // Get the content region for the 3D view
+    ImVec2 viewport_size = ImGui::GetContentRegionAvail();
+    ImVec2 viewport_pos = ImGui::GetCursorScreenPos();
+    
+    if (viewport_size.x > 0 && viewport_size.y > 0) {
+        // Set up matrices
+        float aspect = viewport_size.x / viewport_size.y;
+        glm::mat4 projection = glm::perspective(glm::radians(app.camera_fov), aspect, 0.1f, 1000.0f);
+        glm::mat4 view = glm::lookAt(app.camera_pos, app.camera_target, app.camera_up);
+        glm::mat4 model = glm::mat4(1.0f);
+        
+        // Use shader program
+        glUseProgram(app.shader_program);
+        
+        // Set uniforms
+        GLint model_loc = glGetUniformLocation(app.shader_program, "model");
+        GLint view_loc = glGetUniformLocation(app.shader_program, "view");
+        GLint projection_loc = glGetUniformLocation(app.shader_program, "projection");
+        
+        glUniformMatrix4fv(model_loc, 1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(view_loc, 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(projection_loc, 1, GL_FALSE, glm::value_ptr(projection));
+        
+        // Set polygon mode
+        if (app.show_wireframe) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        } else {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
+        
+        // Render coordinate axes
+        if (app.show_axes) {
+            glLineWidth(3.0f);
+            glBindVertexArray(app.axis_vao);
+            glDrawArrays(GL_LINES, 0, 6);
+            glBindVertexArray(0);
+            glLineWidth(1.0f);
+        }
+        
+        // Render model geometry
+        if (app.model_loaded) {
+            // Render elements
+            if (app.show_elements && app.element_vao != 0 && app.element_index_count > 0) {
+                glBindVertexArray(app.element_vao);
+                glDrawElements(GL_TRIANGLES, app.element_index_count, GL_UNSIGNED_INT, 0);
+                glBindVertexArray(0);
+            }
+            
+            // Render nodes as points
+            if (app.show_nodes && app.node_vao != 0 && app.node_count > 0) {
+                glPointSize(5.0f);
+                glBindVertexArray(app.node_vao);
+                glDrawArrays(GL_POINTS, 0, app.node_count);
+                glBindVertexArray(0);
+                glPointSize(1.0f);
+            }
+        }
+        
+        // Reset polygon mode
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        
+        // Handle viewport interactions
+        ImGui::InvisibleButton("3DViewport", viewport_size);
+        
+        if (ImGui::IsItemHovered()) {
+            ImGuiIO& io = ImGui::GetIO();
+            
+            // Mouse wheel for zoom
+            if (io.MouseWheel != 0.0f) {
+                app.camera_distance *= (1.0f - io.MouseWheel * 0.1f);
+                app.camera_distance = glm::clamp(app.camera_distance, 0.1f, 1000.0f);
+            }
+            
+            // Mouse drag for rotation
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                app.camera_rotation_y += delta.x * 0.01f;
+                app.camera_rotation_x += delta.y * 0.01f;
+                app.camera_rotation_x = glm::clamp(app.camera_rotation_x, -1.5f, 1.5f);
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            }
+        }
+    }
+    
+    // Display instructions if no model is loaded
+    if (!app.model_loaded) {
+        ImGui::SetCursorPosX((viewport_size.x - 200) * 0.5f);
+        ImGui::SetCursorPosY((viewport_size.y - 60) * 0.5f);
+        ImGui::BeginGroup();
+        ImGui::Text("No model loaded");
+        ImGui::Text("Use File -> Open to load a RAD file");
+        if (ImGui::Button("Open File...")) {
+            app.show_file_dialog = true;
+        }
+        ImGui::EndGroup();
+    }
+    
+    ImGui::End();
+}
+
+void cleanup(AppState& app) {
+    // Clean up OpenGL objects
+    if (app.shader_program != 0) {
+        glDeleteProgram(app.shader_program);
+    }
+    
+    if (app.node_vao != 0) {
+        glDeleteVertexArrays(1, &app.node_vao);
+        glDeleteBuffers(1, &app.node_vbo);
+    }
+    
+    if (app.element_vao != 0) {
+        glDeleteVertexArrays(1, &app.element_vao);
+        glDeleteBuffers(1, &app.element_vbo);
+        glDeleteBuffers(1, &app.element_ebo);
+    }
+    
+    if (app.axis_vao != 0) {
+        glDeleteVertexArrays(1, &app.axis_vao);
+        glDeleteBuffers(1, &app.axis_vbo);
+    }
+    
+    // Cleanup ImGui
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    
+    // Cleanup GLFW
+    if (app.window) {
+        glfwDestroyWindow(app.window);
+    }
+    glfwTerminate();
+    
+    std::cout << "Application cleaned up successfully" << std::endl;
+}
+
+// GLFW Callbacks
+void errorCallback(int error, const char* description) {
+    std::cerr << "GLFW Error " << error << ": " << description << std::endl;
+}
+
+void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    (void)scancode; // Suppress unused parameter warning
+    AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    
+    if (action == GLFW_PRESS) {
+        switch (key) {
+            case GLFW_KEY_ESCAPE:
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                break;
+            case GLFW_KEY_O:
+                if (mods & GLFW_MOD_CONTROL) {
+                    app->show_file_dialog = true;
+                }
+                break;
+            case GLFW_KEY_F1:
+                app->show_about = true;
+                break;
+            case GLFW_KEY_R:
+                // Reset camera
+                app->camera_rotation_x = 0.0f;
+                app->camera_rotation_y = 0.0f;
+                if (app->model_loaded) {
+                    glm::vec3 size = app->model_max - app->model_min;
+                    float max_size = glm::max(glm::max(size.x, size.y), size.z);
+                    app->camera_distance = max_size * 2.0f;
+                } else {
+                    app->camera_distance = 5.0f;
+                }
+                break;
+            case GLFW_KEY_1:
+                app->show_nodes = !app->show_nodes;
+                break;
+            case GLFW_KEY_2:
+                app->show_elements = !app->show_elements;
+                break;
+            case GLFW_KEY_3:
+                app->show_wireframe = !app->show_wireframe;
+                break;
+            case GLFW_KEY_4:
+                app->show_axes = !app->show_axes;
+                break;
+        }
+    }
+}
+
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    (void)mods; // Suppress unused parameter warning
+    AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            app->mouse_dragging = true;
+            glfwGetCursorPos(window, &app->last_mouse_x, &app->last_mouse_y);
+        } else if (action == GLFW_RELEASE) {
+            app->mouse_dragging = false;
+        }
+    }
+}
+
+void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
+    AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    
+    if (app->mouse_dragging) {
+        double delta_x = xpos - app->last_mouse_x;
+        double delta_y = ypos - app->last_mouse_y;
+        
+        const float sensitivity = 0.01f;
+        
+        app->camera_rotation_y += static_cast<float>(delta_x) * sensitivity;
+        app->camera_rotation_x += static_cast<float>(delta_y) * sensitivity;
+        
+        // Clamp vertical rotation
+        app->camera_rotation_x = glm::clamp(app->camera_rotation_x, -1.5f, 1.5f);
+        
+        app->last_mouse_x = xpos;
+        app->last_mouse_y = ypos;
+    }
+}
+
+void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    (void)xoffset; // Suppress unused parameter warning
+    AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    
+    // Zoom in/out
+    app->camera_distance *= (1.0f - static_cast<float>(yoffset) * 0.1f);
+    app->camera_distance = glm::clamp(app->camera_distance, 0.1f, 1000.0f);
+}
+
+void windowSizeCallback(GLFWwindow* window, int width, int height) {
+    AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+    
+    app->window_width = width;
+    app->window_height = height;
+    glViewport(0, 0, width, height);
+}

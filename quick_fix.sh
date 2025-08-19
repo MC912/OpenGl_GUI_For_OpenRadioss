@@ -1,3 +1,128 @@
+#!/bin/bash
+
+# Clean fix script for OpenRadioss GUI compilation errors
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+print_status "OpenRadioss GUI - Clean Compilation Fix"
+print_status "======================================"
+
+# Check if we're in the right directory
+if [[ ! -f "CMakeLists.txt" ]]; then
+    print_error "CMakeLists.txt not found. Please run this script from the project root."
+    exit 1
+fi
+
+# Create backups
+print_status "Creating backups..."
+[[ -f "src/main.cpp" ]] && cp src/main.cpp src/main.cpp.backup
+[[ -f "include/radfilereader.h" ]] && cp include/radfilereader.h include/radfilereader.h.backup
+[[ -f "radfilereader.h" ]] && cp radfilereader.h radfilereader.h.backup
+
+# Ensure directory structure exists
+mkdir -p src include examples
+
+# Fix 1: Add getMaterialCount() to radfilereader.h if missing
+print_status "Fixing radfilereader.h..."
+if [[ -f "include/radfilereader.h" ]]; then
+    if ! grep -q "getMaterialCount" include/radfilereader.h; then
+        # Add the missing method after getElementCount line
+        sed -i '/getElementCount.*const/a\    size_t getMaterialCount() const { return materials_.size(); }' include/radfilereader.h
+        print_success "Added getMaterialCount() to include/radfilereader.h"
+    else
+        print_status "getMaterialCount() already exists in include/radfilereader.h"
+    fi
+elif [[ -f "radfilereader.h" ]]; then
+    if ! grep -q "getMaterialCount" radfilereader.h; then
+        sed -i '/getElementCount.*const/a\    size_t getMaterialCount() const { return materials_.size(); }' radfilereader.h
+        print_success "Added getMaterialCount() to radfilereader.h"
+    else
+        print_status "getMaterialCount() already exists in radfilereader.h"
+    fi
+else
+    print_warning "Creating minimal radfilereader.h..."
+    cat > include/radfilereader.h << 'EOF'
+#pragma once
+#include <string>
+#include <vector>
+#include <glm/glm.hpp>
+
+namespace OpenRadiossGUI {
+
+struct Node {
+    int id;
+    glm::vec3 position;
+    Node() : id(0), position(0.0f) {}
+    Node(int nodeId, float x, float y, float z) : id(nodeId), position(x, y, z) {}
+};
+
+struct Element {
+    enum Type { UNKNOWN = 0, TRIA3 = 3, QUAD4 = 4, TETRA4 = 10, HEXA8 = 12 };
+    int id;
+    Type type;
+    int materialId, propertyId;
+    std::vector<int> nodeIds;
+    Element() : id(0), type(UNKNOWN), materialId(0), propertyId(0) {}
+};
+
+struct Material {
+    int id;
+    std::string name, type;
+    Material() : id(0) {}
+};
+
+class RadFileReader {
+public:
+    RadFileReader() : isValid_(false) {}
+    ~RadFileReader() {}
+    
+    bool loadFile(const std::string& filename);
+    bool saveFile(const std::string& filename) const { return false; }
+    void clear() { nodes_.clear(); elements_.clear(); materials_.clear(); isValid_ = false; }
+    
+    const std::vector<Node>& getNodes() const { return nodes_; }
+    const std::vector<Element>& getElements() const { return elements_; }
+    const std::vector<Material>& getMaterials() const { return materials_; }
+    
+    std::string getTitle() const { return title_; }
+    bool isValid() const { return isValid_; }
+    std::string getLastError() const { return lastError_; }
+    
+    size_t getNodeCount() const { return nodes_.size(); }
+    size_t getElementCount() const { return elements_.size(); }
+    size_t getMaterialCount() const { return materials_.size(); }
+    
+    const Node* findNode(int id) const;
+    const Element* findElement(int id) const;
+    std::pair<glm::vec3, glm::vec3> getBoundingBox() const;
+
+private:
+    std::vector<Node> nodes_;
+    std::vector<Element> elements_;
+    std::vector<Material> materials_;
+    std::string title_, lastError_;
+    bool isValid_;
+};
+
+}
+EOF
+    print_success "Created minimal radfilereader.h"
+fi
+
+# Fix 2: Update main.cpp to fix ImGui compatibility issues
+print_status "Fixing main.cpp for ImGui compatibility..."
+cat > src/main.cpp << 'EOF'
 #include <iostream>
 #include <vector>
 #include <string>
@@ -374,3 +499,177 @@ int main() {
     glfwTerminate();
     return 0;
 }
+EOF
+
+print_success "Created clean main.cpp without ImGui docking issues"
+
+# Fix 3: Ensure radfilereader.cpp exists and works
+print_status "Ensuring radfilereader.cpp exists..."
+if [[ ! -f "src/radfilereader.cpp" ]]; then
+    cat > src/radfilereader.cpp << 'EOF'
+#include "../include/radfilereader.h"
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+
+namespace OpenRadiossGUI {
+
+bool RadFileReader::loadFile(const std::string& filename) {
+    clear();
+    
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        lastError_ = "Cannot open file: " + filename;
+        return false;
+    }
+    
+    std::string line;
+    bool inNodes = false, inElements = false, inMaterials = false;
+    
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#' || line[0] == 'C') continue;
+        
+        if (line.find("/TITLE") != std::string::npos) {
+            std::getline(file, title_);
+            continue;
+        }
+        if (line.find("/NODE") != std::string::npos) {
+            inNodes = true; inElements = false; inMaterials = false;
+            continue;
+        }
+        if (line.find("/SHELL") != std::string::npos || line.find("/QUAD") != std::string::npos) {
+            inNodes = false; inElements = true; inMaterials = false;
+            continue;
+        }
+        if (line.find("/MAT") != std::string::npos) {
+            inNodes = false; inElements = false; inMaterials = true;
+            continue;
+        }
+        
+        if (inNodes) {
+            std::istringstream iss(line);
+            int id;
+            float x, y, z;
+            if (iss >> id >> x >> y >> z) {
+                nodes_.emplace_back(id, x, y, z);
+            }
+        }
+        else if (inElements) {
+            std::istringstream iss(line);
+            std::vector<int> values;
+            int val;
+            while (iss >> val) values.push_back(val);
+            
+            if (values.size() >= 4) {
+                Element element;
+                element.id = values[0];
+                element.materialId = values[1];
+                element.propertyId = values[2];
+                for (size_t i = 3; i < values.size(); ++i) {
+                    element.nodeIds.push_back(values[i]);
+                }
+                element.type = (element.nodeIds.size() == 3) ? Element::TRIA3 : Element::QUAD4;
+                elements_.push_back(element);
+            }
+        }
+        else if (inMaterials) {
+            std::istringstream iss(line);
+            int id;
+            if (iss >> id) {
+                Material mat;
+                mat.id = id;
+                mat.type = "LAW1";
+                materials_.push_back(mat);
+            }
+        }
+    }
+    
+    isValid_ = !nodes_.empty();
+    return isValid_;
+}
+
+const Node* RadFileReader::findNode(int id) const {
+    auto it = std::find_if(nodes_.begin(), nodes_.end(),
+        [id](const Node& node) { return node.id == id; });
+    return (it != nodes_.end()) ? &(*it) : nullptr;
+}
+
+const Element* RadFileReader::findElement(int id) const {
+    auto it = std::find_if(elements_.begin(), elements_.end(),
+        [id](const Element& element) { return element.id == id; });
+    return (it != elements_.end()) ? &(*it) : nullptr;
+}
+
+std::pair<glm::vec3, glm::vec3> RadFileReader::getBoundingBox() const {
+    if (nodes_.empty()) {
+        return std::make_pair(glm::vec3(0.0f), glm::vec3(0.0f));
+    }
+    
+    glm::vec3 minPos = nodes_[0].position;
+    glm::vec3 maxPos = nodes_[0].position;
+    
+    for (const auto& node : nodes_) {
+        minPos = glm::min(minPos, node.position);
+        maxPos = glm::max(maxPos, node.position);
+    }
+    
+    return std::make_pair(minPos, maxPos);
+}
+
+}
+EOF
+    print_success "Created working radfilereader.cpp"
+else
+    print_status "radfilereader.cpp already exists"
+fi
+
+# Fix 4: Create test file
+print_status "Creating test RAD file..."
+cat > examples/test.rad << 'EOF'
+#RADIOSS STARTER
+/BEGIN
+/TITLE
+Simple Test Model
+/NODE
+        1               0.0               0.0               0.0
+        2               1.0               0.0               0.0
+        3               1.0               1.0               0.0
+        4               0.0               1.0               0.0
+        5               0.5               0.5               0.5
+/SHELL
+        1         1         1         1         2         3         4
+/MAT/LAW1
+        1              7.8E-6              210000               0.3
+/PROP/SHELL
+        1               0.001
+/END
+EOF
+
+print_success "Created examples/test.rad"
+
+print_status ""
+print_success "✅ All compilation fixes applied successfully!"
+print_status ""
+print_status "Changes made:"
+print_status "1. ✅ Fixed ImGui compatibility (removed docking features)"
+print_status "2. ✅ Added missing getMaterialCount() method"
+print_status "3. ✅ Created clean main.cpp without code duplication"
+print_status "4. ✅ Ensured radfilereader.cpp implementation exists"
+print_status "5. ✅ Created test RAD file"
+print_status ""
+print_status "Now build the project:"
+print_status "  mkdir -p build && cd build"
+print_status "  cmake .."
+print_status "  make -j4"
+print_status ""
+print_status "Then run:"
+print_status "  ./OpenRadiossGUI"
+print_status ""
+print_status "Features included:"
+print_status "• OpenGL 3D viewport with coordinate axes"
+print_status "• ImGui interface with menus and panels"
+print_status "• Mouse camera controls (drag to rotate, wheel to zoom)"
+print_status "• Keyboard shortcuts (Ctrl+O open, 1-4 toggles, R reset)"
+print_status "• RAD file loading and node visualization"
+print_status ""
+print_success "The GUI should now compile and run without errors!"
